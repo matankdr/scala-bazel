@@ -1,0 +1,860 @@
+#!/bin/bash
+
+# Title        Virtual Monorepo Wrapper
+# Description  Script wrapper for the VMR Python client
+#======================================================
+
+VPN_IP_ADDRESS=${VPN_IP_ADDRESS=192.168.232.49}
+FALLBACK_VPN_IP_ADDRESS=${FALLBACK_VPN_IP_ADDRESS=10.104.118.200}
+VECTOR_NAME="bazel"
+
+VECTOR_PROVIDER_URL_LATEST=${VECTOR_PROVIDER_URL_LATEST="https://bo.wix.com/virtual-mono-repo-server/vector?name=${VECTOR_NAME}"}
+VECTOR_PROVIDER_URL_CACHED=${VECTOR_PROVIDER_URL_CACHED="https://bo.wix.com/virtual-mono-repo-server/vector/cache?name=${VECTOR_NAME}"}
+
+VMR_ARTIFACTORY_WRAPPER_SOURCES=${VMR_ARTIFACTORY_WRAPPER_SOURCES="https://repo.dev.wixpress.com/artifactory/local-dev/virtual-monorepo-wrapper"}
+VMR_CONFIG_FOLDER="${HOME}/.config/wix/virtual-monorepo"
+VMR_WRAPPER_CONFIG_FOLDER="${VMR_CONFIG_FOLDER}/wrapper"
+VMR_WRAPPER_LATEST_VER_FILE_PATH=${VMR_WRAPPER_CONFIG_FOLDER}/latest.txt
+VMR_WRAPPER_SYMLINK_PATH=${VMR_WRAPPER_CONFIG_FOLDER}/curr-version
+VMR_WRAPPER_EXECUTABLE_FILE_NAME=vmr
+VMR_CLIENT_GIT_TRACKED_WORKSPACE_FOLDER_PATH="tools/virtualmonorepo"
+VMR_CLIENT_EXECUTABLE_PATH=main.py
+
+SCRIPT_NAME="Virtual Monorepo Wrapper"
+PYTHON_BIN="python3"
+
+DARWIN_BIN_DIR="$HOME/.local/bin"
+LINUX_BIN_DIR="$HOME/.local/bin"
+
+# Backwards compatible - allow overriding vector provider url from previously used env var
+REPOSITORIES_URL=${REPOSITORIES_URL=${VECTOR_PROVIDER_URL_LATEST}}
+
+CLI_ARGUMENT_PULL_VECTOR_LATEST=""
+CLI_ARGUMENT_PULL_VECTOR_CACHED=""
+CLI_ARGUMENT_LOCK_VECTOR=""
+CLI_ARGUMENT_UNLOCK_VECTOR=""
+CLI_ARGUMENT_GLOBAL_WRAPPER=""
+CLI_ARGUMENT_CONFIG=""
+CLI_ARGUMENT_VERSION=""
+
+CLI_VALUE_GLOBAL_OPTION=""
+
+BUILD_TYPE=${BUILD_TYPE="local"}
+FORCE_UPDATE_FLAG="--force-update"
+SILENT_FLAG=""
+VERBOSE_FLAG=""
+DRY_RUN_FLAG=""
+
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+COLOR_YELLOW="\033[0;33m"
+COLOR_WHITE='\033[1;37m'
+COLOR_LIGHT_CYAN='\033[0;36m'
+COLOR_NONE='\033[0m'
+
+ZSH_RC_PATH="${HOME}/.zshrc"
+BASH_RC_PATH="${HOME}/.bashrc"
+BASH_PROFILE_PATH="${HOME}/.bash_profile"
+
+VECTOR_LOCAL_FOLDER="2nd_party_resolved_dependencies"
+VECTOR_LOCKED_FOLDER="fixed_2nd_party_resolved_dependencies"
+VECTOR_FILE_SUFFIX="2nd_party_resolved_dependencies.bzl"
+
+is_pull_vector_latest_command() {
+  [[ -n ${CLI_ARGUMENT_PULL_VECTOR_LATEST} ]]
+}
+
+is_pull_vector_cached_command() {
+  [[ -n ${CLI_ARGUMENT_PULL_VECTOR_CACHED} ]]
+}
+
+is_lock_vector_command() {
+  [[ -n ${CLI_ARGUMENT_LOCK_VECTOR} ]]
+}
+
+is_unlock_vector_command() {
+  [[ -n ${CLI_ARGUMENT_UNLOCK_VECTOR} ]]
+}
+
+is_global_command() {
+  [[ -n ${CLI_ARGUMENT_GLOBAL_WRAPPER} ]]
+}
+
+is_global_uninstall_command() {
+  is_global_command && [[ ${CLI_VALUE_GLOBAL_OPTION} == "uninstall" ]]
+}
+
+is_config_command() {
+  [[ -n ${CLI_ARGUMENT_CONFIG} ]]
+}
+
+is_version_command() {
+  [[ -n ${CLI_ARGUMENT_VERSION} ]]
+}
+
+is_directory_exist() {
+  local path=$1
+  [[ -d "${path}" ]]
+}
+
+is_directory_empty() {
+  local path=$1
+  if is_directory_exist "${path}"; then
+    [[ "$(ls -A "${path}")" ]]
+  else
+    return 0
+  fi
+}
+
+is_file_size_bigger_than_zero() {
+  local path=$1
+  [[ -e "${path}" ]]
+}
+
+is_symlink() {
+  local abs_path=$1
+  [[ -L "${abs_path}" ]]
+}
+
+is_file_exist() {
+  local path=$1
+  [[ -f "${path}" || $(is_symlink "${path}") ]]
+}
+
+is_file_contain() {
+  local filepath=$1
+  local text=$2
+  grep -q -w "${text}" "${filepath}"
+}
+
+should_pull_latest_vector() {
+  [[ -n ${CLI_ARGUMENT_PULL_VECTOR_LATEST} ]]
+}
+
+should_pull_cached_vector() {
+  [[ -n ${CLI_ARGUMENT_PULL_VECTOR_CACHED} ]]
+}
+
+is_valid_client_symlink() {
+  # Check if symlink does not point to non-existent path
+  [[ -e ${VMR_WRAPPER_SYMLINK_PATH} ]]
+}
+
+_log_base() {
+  prefix=$1
+  shift
+  echo -e "${prefix}$*" >&2
+}
+
+log_info() {
+  _log_base "${COLOR_GREEN}INFO${COLOR_NONE}: " "$@"
+}
+
+log_warning() {
+  _log_base "${COLOR_YELLOW}WARNING${COLOR_NONE}: " "$@"
+}
+
+log_error() {
+  _log_base "${COLOR_RED}ERROR${COLOR_NONE}: " "$@"
+}
+
+log_fatal() {
+  _log_base "${COLOR_RED}ERROR${COLOR_NONE}: " "$@"
+  exit 1
+}
+
+is_tool_exist() {
+  local name=$1
+  [[ $(command -v "${name}") ]]
+}
+
+# Trim version from symlink path:
+# $HOME/.config/wix/virtual-monorepo/wrapper/0.0.0/vmr -->
+# 0.0.0/vmr -->
+# 0.0.0
+_try_read_client_wrapper_version() {
+  local wrapper_version="N/A"
+  local real_wrapper_path=$(readlink "${VMR_WRAPPER_SYMLINK_PATH}")
+  if [[ -f ${real_wrapper_path} ]]; then
+    # Trim prefix
+    trimmed_prefix=${real_wrapper_path##*"${VMR_WRAPPER_CONFIG_FOLDER}/"}
+
+    # Trim suffix
+    wrapper_version=${trimmed_prefix%/${VMR_WRAPPER_EXECUTABLE_FILE_NAME}}
+  fi
+
+  echo "${wrapper_version}"
+}
+
+print_wrapper_version_and_exit() {
+  if is_client_installed_globally; then
+    local wrapper_version=$(_try_read_client_wrapper_version)
+    echo -e """VMR Wrapper v${wrapper_version}"""
+  else
+    local workspace_path=$(read_workspace_path)
+    echo -e """VMR wrapper is source controlled and does not have a version.
+
+To install the wrapper globally, run the following:
+
+  ${COLOR_GREEN}${workspace_path}/tools/vmr${COLOR_NONE} ${COLOR_YELLOW}global install${COLOR_NONE}"""
+  fi
+  exit 0
+}
+
+print_configuration_and_exit() {
+  local workspace_path=$1  
+  local config_folder="not globally installed"
+  local bin_folder="not globally installed"
+
+  if is_client_installed_globally; then
+    config_folder=${VMR_WRAPPER_CONFIG_FOLDER}
+    bin_folder=$(calculate_vmr_exec_symlink_path)
+  fi
+
+  local repo_rule_type="${VMR_REPO_RULE_TYPE}"
+  if [[ -z "${repo_rule_type}" ]]; then
+    repo_rule_type="N/A (defaults to git_cached_repository)"
+  fi
+
+  local vmr_cached_vector_url=$(parse_cached_vector_url)
+  local metadata=$(read_vector_metadata_from_local_sources "${workspace_path}" | jq)
+
+  echo -e """
+${COLOR_WHITE}MACHINE INFO${COLOR_NONE}:
+
+  ${COLOR_LIGHT_CYAN}Operating System${COLOR_NONE}....: $(read_os_type)
+  ${COLOR_LIGHT_CYAN}Architecture${COLOR_NONE}........: $(read_arch)
+
+${COLOR_WHITE}LOCATIONS${COLOR_NONE}:
+
+  ${COLOR_LIGHT_CYAN}VMR Client${COLOR_NONE}..........: ${workspace_path}/${VMR_CLIENT_GIT_TRACKED_WORKSPACE_FOLDER_PATH}
+  ${COLOR_LIGHT_CYAN}Configuration${COLOR_NONE}.......: ${config_folder}
+  ${COLOR_LIGHT_CYAN}Global Binary${COLOR_NONE}.......: ${bin_folder}
+
+${COLOR_WHITE}REMOTE${COLOR_NONE}:
+
+  ${COLOR_LIGHT_CYAN}VMR Latest URL${COLOR_NONE}......: ${VECTOR_PROVIDER_URL_LATEST}
+  ${COLOR_LIGHT_CYAN}VMR Cached URL${COLOR_NONE}......: ${vmr_cached_vector_url}
+ 
+${COLOR_WHITE}ENV VARS${COLOR_NONE}:
+
+  ${COLOR_LIGHT_CYAN}VMR_REPO_RULE_TYPE${COLOR_NONE}..: ${repo_rule_type}
+  ${COLOR_LIGHT_CYAN}BUILD_TYPE${COLOR_NONE}..........: ${BUILD_TYPE}
+
+${COLOR_WHITE}VECTOR METADATA${COLOR_NONE}:
+
+${COLOR_LIGHT_CYAN}${metadata}${COLOR_NONE}
+"""
+  exit 0
+}
+
+_run_resolve_vector() {
+  local workspace_path=$1
+  local cmd_symlink=$2
+  local repositories_url=$3
+
+  export PYTHONPATH="${workspace_path}/tools"
+  
+  ${PYTHON_BIN} "${cmd_symlink}" \
+    ${SILENT_FLAG} \
+    ${VERBOSE_FLAG} \
+    resolve-vector \
+    --workspace-dir="${workspace_path}" \
+    --vector-provider-url="${repositories_url}" \
+    --build-type=${BUILD_TYPE} \
+    --build-branch-override="${BUILDKITE_BRANCH}" ${FORCE_UPDATE_FLAG} ${DRY_RUN_FLAG}
+}
+
+_run_local_vector() {
+  local workspace_path=$1
+  local cmd_symlink=$2
+
+  export PYTHONPATH="${workspace_path}/tools"
+  
+  ${PYTHON_BIN} "${cmd_symlink}" \
+    ${SILENT_FLAG} \
+    ${VERBOSE_FLAG} \
+    local-vector \
+    --workspace-dir="${workspace_path}" \
+    --metadata
+}
+
+read_version_from_latest_file() {
+  if [[ -e ${VMR_WRAPPER_LATEST_VER_FILE_PATH} ]]; then
+    cat "${VMR_WRAPPER_LATEST_VER_FILE_PATH}"
+  else
+    echo ""
+  fi
+}
+
+is_valid_latest_file() {
+  [[ -s ${VMR_WRAPPER_LATEST_VER_FILE_PATH} ]]
+}
+
+get_wrapper_versioned_exec_path() {
+  local version=$1
+  # $HOME/.config/wix/virtual-monorepo/wrapper/0.x.0/vmr
+  echo "${VMR_WRAPPER_CONFIG_FOLDER}/${version}/${VMR_WRAPPER_EXECUTABLE_FILE_NAME}"
+}
+
+create_wrapper_versioned_folder() {
+  local version=$1
+  local versioned_folder=${VMR_WRAPPER_CONFIG_FOLDER}/${version}
+  mkdir -p "${versioned_folder}"
+  echo "${versioned_folder}"
+}
+
+adjust_symlink_to_version() {
+  local version=$1
+  local exec_path=$(get_wrapper_versioned_exec_path "${version}")
+  chmod +x "${exec_path}"
+  ln -sf "${exec_path}" "${VMR_WRAPPER_SYMLINK_PATH}"
+}
+
+adjust_global_executable_symlink() {
+  local vmr_exec_symlink_path=$1
+  chmod +x "${VMR_WRAPPER_SYMLINK_PATH}"
+  # macOS: ~/.local/bin/vmr --> ~/.config/wix/virtual-monorepo/wrapper/curr-version
+  # Linux: ~/.local/bin/vmr --> ~/.config/wix/virtual-monorepo/wrapper/curr-version
+  ln -sf "${VMR_WRAPPER_SYMLINK_PATH}" "${vmr_exec_symlink_path}" 
+}
+
+download_wrapper_by_version() {
+  local version=$1
+  local versioned_folder=$(create_wrapper_versioned_folder "${version}")
+  local versioned_wrapper_path=${versioned_folder}/${VMR_WRAPPER_EXECUTABLE_FILE_NAME}
+
+  log_info "Updating virtual-monorepo wrapper to v${version}..."
+  curl -sfL ${VMR_ARTIFACTORY_WRAPPER_SOURCES}/"${version}"/${VMR_WRAPPER_EXECUTABLE_FILE_NAME} >"${versioned_wrapper_path}"
+
+  if ! is_file_size_bigger_than_zero "${versioned_wrapper_path}"; then
+    log_fatal "Failed downloading latest version from remote, aborting"
+  fi
+
+  chmod +x "${versioned_wrapper_path}"
+}
+
+is_shell_supported() {
+  local shell_in_use="${SHELL}"
+  if [[ "${shell_in_use}" == *bash* || "${shell_in_use}" == *zsh* ]]; then
+    echo "${shell_in_use}"
+  else
+    echo ""
+  fi
+}
+
+add_vmr_exec_symlink_path_to_rc_file() {
+  local vmr_bin_folder_symlink_path=$1
+  local shell_in_use=$(is_shell_supported)
+
+  if [[ -z "${shell_in_use}" ]] ; then
+    log_error "Shell '${shell_in_use}' is not supported (supported shells: bash, zsh)"
+    echo -e """${COLOR_RED}
+To use 'vmr' from global scope, add the following to the end of the RC file:
+      
+  export PATH=${vmr_bin_folder_symlink_path}:\${PATH}
+${COLOR_NONE}
+    """
+  else
+
+    if is_file_exist "${ZSH_RC_PATH}" && ! is_file_contain "${ZSH_RC_PATH}" "${vmr_bin_folder_symlink_path}" ; then
+      log_info "Updating the shell PATH. file: ${ZSH_RC_PATH}, path: ${vmr_bin_folder_symlink_path}"
+      echo -e "\nexport PATH=${vmr_bin_folder_symlink_path}:\${PATH}" >> "${ZSH_RC_PATH}"
+    fi
+
+    if is_file_exist "${BASH_RC_PATH}" && ! is_file_contain "${BASH_RC_PATH}" "${vmr_bin_folder_symlink_path}" ; then
+      log_info "Updating the shell PATH. file: ${BASH_RC_PATH}, path: ${vmr_bin_folder_symlink_path}"
+      echo -e "\nexport PATH=${vmr_bin_folder_symlink_path}:\${PATH}" >> "${BASH_RC_PATH}"
+    fi
+
+    if is_file_exist "${BASH_PROFILE_PATH}" && ! is_file_contain "${BASH_PROFILE_PATH}" "${vmr_bin_folder_symlink_path}" ; then
+      log_info "Updating the shell PATH. file: ${BASH_PROFILE_PATH}, path: ${vmr_bin_folder_symlink_path}"
+      echo -e "\nexport PATH=${vmr_bin_folder_symlink_path}:\${PATH}" >> "${BASH_PROFILE_PATH}"
+    fi
+  fi
+}
+
+uninstall_wrapper() {
+  local vmr_exec_symlink_path=$1
+  log_info "Removing virtual-monorepo wrapper. path: ${vmr_exec_symlink_path}"
+
+  if [[ -e "${vmr_exec_symlink_path}" ]]; then
+    unlink "${vmr_exec_symlink_path}"
+  fi
+
+  log_info "Clearing environment. path ${VMR_CONFIG_FOLDER}"
+  if [[ -d ${VMR_CONFIG_FOLDER} && ${VMR_CONFIG_FOLDER} == *"virtual-monorepo" ]]; then
+    rm -rf "${VMR_CONFIG_FOLDER}"
+  fi
+  log_info "Successfully uninstalled virtual-monorepo wrapper"
+}
+
+install_wrapper_from_remote_server() {
+  local vmr_exec_symlink_path=$1
+  local vmr_bin_folder_symlink_path=$(calculate_vmr_bin_folder_symlink_path)
+
+  log_info "Installing virtual-monorepo wrapper. path: ${vmr_exec_symlink_path}"
+  
+  if ! is_directory_exist "${vmr_bin_folder_symlink_path}"; then
+    mkdir -p "${vmr_bin_folder_symlink_path}"
+  fi
+
+  check_for_updates
+  adjust_global_executable_symlink "${vmr_exec_symlink_path}"
+  add_vmr_exec_symlink_path_to_rc_file "${vmr_bin_folder_symlink_path}"
+  log_info "Type 'vmr' to start using the global wrapper (shell session reload might be required)"
+}
+
+run_global_command_and_exit() {
+  local action=$1
+  local vmr_exec_symlink_path=$(calculate_vmr_exec_symlink_path)
+  if [[ -z "${vmr_exec_symlink_path}" ]]; then
+    log_fatal "OS type is not supported"
+    exit 1
+  else
+    if [[ "${action}" == "install" ]]; then
+      install_wrapper_from_remote_server "${vmr_exec_symlink_path}"
+    elif [[ "${action}" == "uninstall" ]]; then
+      uninstall_wrapper "${vmr_exec_symlink_path}"
+    elif [[ "${action}" == "update" ]]; then
+      if is_tool_exist "vmr"; then
+        check_for_updates
+      else
+        log_fatal "Cannot identify a globally installed 'vmr' utility, skipping update."
+      fi
+    else
+      log_fatal "Supported 'global' values: install/uninstall/update. Invalid value: ${action}"
+    fi
+    exit 0
+  fi
+}
+
+check_for_updates() {
+  log_info "Checking for virtual-monorepo wrapper updates..."
+
+  if ! is_directory_exist "${VMR_WRAPPER_CONFIG_FOLDER}"; then
+    mkdir -p "${VMR_WRAPPER_CONFIG_FOLDER}"
+    chmod +x "${VMR_WRAPPER_CONFIG_FOLDER}"
+  fi
+
+  curl -sfL ${VMR_ARTIFACTORY_WRAPPER_SOURCES}/latest.txt >"${VMR_WRAPPER_LATEST_VER_FILE_PATH}"
+
+  # Check that local version file exists and has a size greater than zero
+  if ! is_valid_latest_file; then
+    log_warning "Failed to read latest VMR wrapper version from remote (VPN Connection?), VMR wrapper won't be updated"
+  else
+    latest_version_downloaded=$(read_version_from_latest_file)
+    if [[ -z ${latest_version_downloaded} ]]; then
+      log_warning "Received invalid VMR wrapper version from remote, VMR wrapper won't be updated"
+    else
+      exec_path=$(get_wrapper_versioned_exec_path "${latest_version_downloaded}")
+      if [[ -s ${exec_path} ]]; then
+        log_info "Local version of virtual-monorepo wrapper is up to date (v${latest_version_downloaded})"
+      else
+        download_wrapper_by_version "${latest_version_downloaded}"
+        adjust_symlink_to_version "${latest_version_downloaded}"
+        log_info "Successfully updated to v${latest_version_downloaded}"
+      fi
+    fi
+  fi
+}
+
+read_os_type() {
+  if [[ "${OSTYPE}" == "linux"* ]]; then
+    echo "linux"
+  elif [[ "${OSTYPE}" == "darwin"* ]]; then
+    echo "darwin"
+  else
+    log_fatal "OS type is not supported. os: ${OSTYPE}"
+  fi
+}
+
+read_arch() {
+  local amd64="amd64"
+  local arm="arm"
+  local arm64="arm64"
+  local i386="386"
+  local arch=$(uname -m | tr '[:upper:]' '[:lower:]')
+
+  local result=""
+
+  # Replace arch with custom mapping
+  case "${arch}" in
+    x86_64*)
+      result=$amd64
+      ;;
+    386*)
+      result=$i386
+      ;;
+    armv*)
+      result=$arm
+      ;;
+    arm64*)
+      result=$arm64
+      ;;
+  esac
+
+  echo "${result}"
+}
+
+calculate_vmr_bin_folder_symlink_path() {
+  local os_type=$(read_os_type)
+  if [[ "${os_type}" == "linux" ]]; then
+    echo "${LINUX_BIN_DIR}"
+  elif [[ "${os_type}" == "darwin" ]]; then
+    echo "${DARWIN_BIN_DIR}"
+  else
+    echo ""
+  fi
+}
+
+calculate_vmr_exec_symlink_path() {
+  local vmr_bin_folder=$(calculate_vmr_bin_folder_symlink_path)
+  echo "${vmr_bin_folder}/${VMR_WRAPPER_EXECUTABLE_FILE_NAME}"
+}
+
+identify_repository_name() {
+  workspace_path=$(read_workspace_path)
+  if [[ -z ${workspace_path} ]]; then
+    log_fatal "Could not resolve a valid Bazel WORKSPACE parent"
+  fi
+
+  repository_name=$(grep -n -e "repository_name\s*=" "$(read_workspace_path)/WORKSPACE" | tr -d ' ' | grep -o '".*"' | tr -d '"')
+
+  echo "${repository_name}"
+}
+
+parse_cached_vector_url() {
+  local repository_name=$(identify_repository_name)
+  local os=$(read_os_type)
+  local arch=$(read_arch)
+
+  local cached_repositories_url="${VECTOR_PROVIDER_URL_CACHED}&repo=${repository_name}&os=${os}&arch=${arch}"
+  echo "${cached_repositories_url}"
+}
+
+run_from_local_sources() {
+  local workspace_path=$1  
+  local cmd_symlink="${workspace_path}/${VMR_CLIENT_GIT_TRACKED_WORKSPACE_FOLDER_PATH}/${VMR_CLIENT_EXECUTABLE_PATH}"
+
+  local requested_vector_mode=""
+  if should_pull_latest_vector; then
+    requested_vector_mode="LATEST"
+    log_info "Pulling vector from remote. mode: LATEST HEAD"
+    _run_resolve_vector "${workspace_path}" "${cmd_symlink}" "${VECTOR_PROVIDER_URL_LATEST}"
+  fi
+
+  if should_pull_cached_vector; then
+    requested_vector_mode="CACHED"
+    local cached_repositories_url=$(parse_cached_vector_url)
+    log_info "Pulling vector from remote. mode: CACHED"
+    _run_resolve_vector "${workspace_path}" "${cmd_symlink}" "${cached_repositories_url}"
+  fi
+
+  local metadata=$(read_vector_metadata_from_local_sources "${workspace_path}")
+  if [[ "${metadata}" != *"${requested_vector_mode}"* ]]; then
+    local received_vector_mode="N/A"
+    received_vector_mode=$(echo "${metadata}" | jq '.metadata
+      | select(.vector_mode)
+      | .vector_mode')
+    log_warning "Requested \"${requested_vector_mode}\" vector but received ${received_vector_mode} (macOS cached vector is not supported yet)"
+  fi
+}
+
+read_vector_metadata_from_local_sources() {
+  local workspace_path=$1  
+  local cmd_symlink="${workspace_path}/${VMR_CLIENT_GIT_TRACKED_WORKSPACE_FOLDER_PATH}/${VMR_CLIENT_EXECUTABLE_PATH}"
+
+  echo $(_run_local_vector "${workspace_path}" "${cmd_symlink}")
+}
+
+read_workspace_path() {
+  local workspace_path="${PWD}"
+  found="False"
+  while [[ "$workspace_path" != / ]]; do
+    if [[ -e "$workspace_path/WORKSPACE" ]]; then
+      found="True"
+      break
+    fi
+    workspace_path="$(dirname "$workspace_path")"
+  done
+
+  # Ignore potential WORKSPACE files located in home root folder
+  if [[ ${found} == "False" || ${workspace_path} == "${HOME}" ]]; then
+    workspace_path=""
+  fi
+
+  echo "$workspace_path"
+}
+
+print_help_menu_and_exit() {
+  local exec_filename=$1
+  local base_exec_filename=$(basename "${exec_filename}")
+  echo -e " "
+  echo -e "${SCRIPT_NAME} - Update revisions for 2nd party dependencies"
+  echo -e " "
+  echo -e "${COLOR_WHITE}USAGE${COLOR_NONE}"
+  echo -e "  ${base_exec_filename} [options]"
+  echo -e " "
+  echo -e "${COLOR_WHITE}AVAILABLE COMMANDS${COLOR_NONE}"
+  echo -e "  ${COLOR_LIGHT_CYAN}pull${COLOR_NONE}                      Align local VMR vector with cached revisions of all 2nd parties"
+  echo -e "  ${COLOR_LIGHT_CYAN}pull-latest${COLOR_NONE}               Align local VMR vector with master HEAD revisions of all 2nd parties"
+  echo -e "  ${COLOR_LIGHT_CYAN}lock-vector${COLOR_NONE}               Override CI build vector with a locked one from ${COLOR_GREEN}current branch${COLOR_NONE}"
+  echo -e "  ${COLOR_LIGHT_CYAN}unlock-vector${COLOR_NONE}             Clear CI locked vector and pull for a new local vector"
+  echo -e "  ${COLOR_LIGHT_CYAN}global${COLOR_NONE} [option]           Install, uninstall or update 'vmr' on global scope (options: install/uninstall/update)"
+  echo -e "  ${COLOR_LIGHT_CYAN}config${COLOR_NONE}                    Print wrapper configuration paths, env vars and remote URLs"
+  echo -e "  ${COLOR_LIGHT_CYAN}version${COLOR_NONE}                   Print wrapper version"
+  echo -e " "
+  echo -e "${COLOR_WHITE}FLAGS${COLOR_NONE}"
+  echo -e "  ${COLOR_LIGHT_CYAN}--dry-run${COLOR_NONE}                 Print the pull commands output without file system changes"
+  echo -e "  ${COLOR_LIGHT_CYAN}-h${COLOR_NONE} (--help)               Show available actions and their description"
+  echo -e "  ${COLOR_LIGHT_CYAN}-v${COLOR_NONE} (--verbose)            Execute virtual-monorepo client with debug logs"
+  echo -e "  ${COLOR_LIGHT_CYAN}-s${COLOR_NONE} (--silent)             Execute virtual-monorepo client silently"
+  echo -e " "
+  exit 0
+}
+
+parse_program_arguments() {
+  if [ $# = 0 ]; then
+    print_help_menu_and_exit "$0"
+  fi
+
+  while test $# -gt 0; do
+    case "$1" in
+    -h | --help)
+      print_help_menu_and_exit "$0"
+      shift
+      ;;
+    pull)
+      CLI_ARGUMENT_PULL_VECTOR_CACHED="pull"
+      shift
+      ;;
+    pull-latest)
+      CLI_ARGUMENT_PULL_VECTOR_LATEST="pull-latest"
+      shift
+      ;;
+    lock-vector)
+      CLI_ARGUMENT_LOCK_VECTOR="lock-vector"
+      shift
+      ;;
+    unlock-vector)
+      CLI_ARGUMENT_UNLOCK_VECTOR="unlock-vector"
+      shift
+      ;;
+    global)
+      CLI_ARGUMENT_GLOBAL_WRAPPER="global"
+      shift
+      CLI_VALUE_GLOBAL_OPTION=$1
+      shift
+      ;;
+    config)
+      CLI_ARGUMENT_CONFIG="config"
+      shift
+      ;;
+    version)
+      # Actual Python client is using version as flag: --version
+      CLI_ARGUMENT_VERSION="--version"
+      shift
+      ;;
+    --dry-run)
+      # Actual Python client is using dry-run as flag: --dry-run
+      DRY_RUN_FLAG="--dry-run"
+      shift
+      ;;
+    -s | --silent)
+      SILENT_FLAG="--silent"
+      shift
+      ;;
+    -v | --verbose)
+      VERBOSE_FLAG="--verbose"
+      shift
+      ;;
+    *)
+      print_help_menu_and_exit "$0"
+      shift
+      ;;
+    esac
+  done
+}
+
+verify_program_arguments() {
+  # Verify proper command args ordering: vmr global install
+  if check_invalid_global_command_value; then
+    log_fatal "The 'global' command is missing a mandatory option. options: install/uninstall/update"
+  fi
+}
+
+verify_vpn_connection() {
+  if check_if_ip_address_is_accessible "${VPN_IP_ADDRESS}" || check_if_ip_address_is_accessible "${FALLBACK_VPN_IP_ADDRESS}"; then
+    log_info "Established a valid VPN connection"
+  else
+    log_fatal "Cannot establish a valid VPN connection, skipping VMR vector check"
+  fi
+}
+
+check_if_ip_address_is_accessible() {
+  local ip_address=$1
+  ping -q -c 1 -W 1 "${ip_address}" >/dev/null
+}
+
+check_invalid_global_command_value() {
+  # If global command is not empty and its value is a flag - not valid
+  [[ -n "${CLI_ARGUMENT_GLOBAL_WRAPPER}" && (-z "${CLI_VALUE_GLOBAL_OPTION}" || "${CLI_VALUE_GLOBAL_OPTION}" == -*) ]]
+}
+
+is_client_installed_globally() {
+  is_directory_exist "${VMR_WRAPPER_CONFIG_FOLDER}"
+}
+
+git_get_branch_name() {
+  # Replace / character with _ (Example: zachi/test ==> zachi_test)
+  # Avoid invalid file names when concatenating branch_only vector names i.e.
+  # <branch_name>_<vector_suffix>.bzl
+  git rev-parse --abbrev-ref HEAD | tr / _
+}
+
+unlock_vector_for_ci() {
+  local git_branch=$1
+  local locked_vector_folder_path=$2
+  local locked_vector_branched_file_path=$3
+  local local_vector_folder_path=$4
+
+  log_info "Unlocking an existing vector from branch. name: ${COLOR_YELLOW}${git_branch}${COLOR_NONE}"
+  if ! is_file_exist "${locked_vector_branched_file_path}"; then
+    log_info "No locked vector can be found for branch ${git_branch}"
+  else
+    log_info "Removing git tracked vector file"
+    git rm -f --quiet "${locked_vector_branched_file_path}"
+
+    log_info "Pulling a new local vector and adjusting symlink"
+    CLI_ARGUMENT_PULL_VECTOR_CACHED="True"
+    run_from_local_sources "${workspace_path}"
+  fi
+
+  echo -e """
+${COLOR_GREEN}To disable vector override on CI:${COLOR_NONE}
+  Push the deleted locked vector file to branch ${COLOR_YELLOW}${git_branch}${COLOR_NONE}
+
+${COLOR_GREEN}Locked vector path:${COLOR_NONE}
+  ${locked_vector_branched_file_path}
+"""
+}
+
+lock_vector_for_ci() {
+  local git_branch=$1
+  local locked_vector_folder_path=$2
+  local locked_vector_branched_file_path=$3
+  local local_vector_folder_path=$4
+  local local_vector_symlink_path=$5
+
+  if is_file_size_bigger_than_zero "${locked_vector_branched_file_path}"; then
+    log_info "Git tracked vector file already exist"
+  else
+    log_info "Locking an existing vector under branch. name: ${COLOR_YELLOW}${git_branch}${COLOR_NONE}"
+    if ! is_directory_exist "${locked_vector_folder_path}"; then
+      mkdir -p "${locked_vector_folder_path}"
+    fi
+
+    if ! is_file_exist "${local_vector_branched_file_path}"; then
+      CLI_ARGUMENT_PULL_VECTOR_CACHED="True"
+      run_from_local_sources "${workspace_path}"
+    fi
+
+    # Copy the local vector to the git tracked folder
+    rsync "${local_vector_branched_file_path}" "${locked_vector_branched_file_path}"
+  fi
+
+  log_info "Adjusting local vector symlink to the locked vector file"
+
+  # Adjust current-vector symlink to the locked one 
+  ln -sf "${locked_vector_branched_file_path}" "${local_vector_symlink_path}"
+
+  # Stage the locked vector
+  git add "${locked_vector_branched_file_path}"
+
+  echo -e """
+${COLOR_GREEN}To enable vector override on CI:${COLOR_NONE}
+  Push the locked vector file to branch ${COLOR_YELLOW}${git_branch}${COLOR_NONE}
+
+${COLOR_GREEN}Locked vector path:${COLOR_NONE}
+  ${locked_vector_branched_file_path}
+"""
+}
+
+lock_unlock_vector_and_exit() {
+  local workspace_path=$1
+  local action=$2 # lock/unlock
+  local git_branch=$(git_get_branch_name)
+  local vector_branched_name="${git_branch}_${VECTOR_FILE_SUFFIX}"
+
+  local local_vector_symlink_path="${workspace_path}/tools/2nd_party_resolved_dependencies_current_branch.bzl"
+  local local_vector_folder_path="${workspace_path}/tools/${VECTOR_LOCAL_FOLDER}"
+  local local_vector_branched_file_path="${workspace_path}/tools/${VECTOR_LOCAL_FOLDER}/${vector_branched_name}"
+
+  local locked_vector_folder_path="${workspace_path}/tools/${VECTOR_LOCKED_FOLDER}"
+  local locked_vector_branched_file_path="${workspace_path}/tools/${VECTOR_LOCKED_FOLDER}/${vector_branched_name}"
+
+  if [[ "${action}" == "lock" ]]; then
+    lock_vector_for_ci \
+      "${git_branch}" \
+      "${locked_vector_folder_path}" \
+      "${locked_vector_branched_file_path}" \
+      "${local_vector_folder_path}" \
+      "${local_vector_symlink_path}"
+
+  elif [[ "${action}" == "unlock" ]]; then
+    unlock_vector_for_ci \
+      "${git_branch}" \
+      "${locked_vector_folder_path}" \
+      "${locked_vector_branched_file_path}"
+
+  else
+    log_fatal "Vector action is not supported (options: lock/unlock). value: ${action}"
+  fi
+
+  exit 0
+}
+
+main() {
+  parse_program_arguments "$@"
+  verify_program_arguments
+
+  # Skip checking VPN connection on the following cases:
+  #    - Printing version
+  #    - Printing configuration
+  if ! is_version_command && ! is_config_command && ! is_global_uninstall_command; then
+    verify_vpn_connection
+  fi
+
+  if is_global_command; then
+    run_global_command_and_exit "${CLI_VALUE_GLOBAL_OPTION}"
+  fi
+
+  if is_version_command; then
+    print_wrapper_version_and_exit
+  fi
+
+  local workspace_path=$(read_workspace_path)
+  if [[ -z ${workspace_path} ]]; then
+    log_fatal "Could not resolve a valid Bazel WORKSPACE parent"
+  fi
+
+  if is_config_command; then
+    print_configuration_and_exit "${workspace_path}"
+  fi
+
+  if is_lock_vector_command; then
+    lock_unlock_vector_and_exit "${workspace_path}" "lock"
+  fi
+
+  if is_unlock_vector_command; then
+    lock_unlock_vector_and_exit "${workspace_path}" "unlock"
+  fi
+
+  if is_client_installed_globally; then
+    check_for_updates
+  fi
+  run_from_local_sources "${workspace_path}"
+}
+
+main "$@"

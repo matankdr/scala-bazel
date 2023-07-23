@@ -1,0 +1,12 @@
+load(
+    "@core_server_build_tools//dependencies/rules_scala:rules_scala_custom_phases.bzl",
+    scala_binary = "scala_binary_with_meta",
+    scala_library = "scala_library_with_meta",
+    scala_test = "scala_test_with_meta",
+    scala_macro_library = "scala_macro_library_with_meta",
+    "scala_specs2_junit_test",
+)
+
+load("@core_server_build_tools//:macros.bzl", "sources")
+load("@io_bazel_rules_scala//scala:scala_import.bzl", "scala_import",)
+load("@tests//:tests.bzl", "specs2_unit_test", "specs2_ite2e_test", "specs2_mixed_test")

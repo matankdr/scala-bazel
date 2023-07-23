@@ -1,0 +1,26 @@
+
+### Maven
+target/
+
+# IntelliJ project files
+.idea
+*.iml
+.DS_Store
+.project
+
+#VS code
+.settings
+
+tools/2nd_party_resolved_dependencies_current_branch.bzl
+tools/master_2nd_party_resolved_dependencies.bzl
+tools/third_party_deps_of_external_wix_repositories.bzl
+tools/*_2nd_party_resolved_dependencies.json
+tools/2nd_party_resolved_dependencies/*
+
+/bazel-*
+
+.ijwb/
+swagger.json
+
+# this is a repo without any maven pom files - no need to main them
+pom.xml

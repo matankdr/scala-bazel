@@ -1,0 +1,47 @@
+# NOTE - THIS FILE IS MANUALLY DUPLICATED INSIDE WAZEL CONTAINER (see BazelRcRemoteSettingsWriter.writeToDisk for explanation)
+
+# Remote Build Execution requires a strong hash function, such as SHA256.
+startup --host_jvm_args=-Dbazel.DigestFunction=SHA256
+
+# Set several flags related to specifying the toolchain and java properties.
+# These flags are duplicated rather than imported from (for example)
+# %workspace%/configs/debian8_clang/0.2.0/toolchain.bazelrc to make this
+# bazelrc a standalone file that can be copied more easily.
+build --action_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+build --incompatible_enable_cc_toolchain_resolution
+build:rbe_based --action_env=PLACE_HOLDER=SO_USING_CONFIG_GROUP_WILL_WORK_BW_CMPTBL
+
+# Enforce stricter environment rules, which eliminates some non-hermetic behavior and therefore improves both remote and
+# local cache hit rate and the correctness and repeatability of the build.
+#
+# From Bazel docs:
+# If true, Bazel uses an environment with a static value for PATH and does not inherit LD_LIBRARY_PATH or TMPDIR.
+# Use --action_env=ENV_VARIABLE if you want to inherit specific environment variables from the client, but note that
+# doing so can prevent cross-user caching if a shared cache is used.
+#
+# IMPORTANT!
+# When '--incompatible_strict_action_env' is present, bazel uses PATH=/bin:/usr/bin:/usr/local/bin on MacOS and Linux
+# This can be changed using '--action_env=PATH=XXX', but doing that will result in CACHE MISSES.
+# If different repos uses different values, they will not be able to share the remote cache.
+build --incompatible_strict_action_env=true
+
+# Set a higher timeout value, just in case.
+build --remote_timeout=3600
+
+# Enable authentication. This will pick up application default credentials by
+# default. You can use --auth_credentials=some_file.json to use a service
+# account credential instead.
+build --auth_enabled=true
+
+#The following environment variable is used by bazel integration e2e tests which need to know if we're using the
+#`remote` configuration and so add custom toolchains which means the tests need to add them as well
+test --test_env=REMOTE="true"
+
+test --test_env=CC
+
+# Exclude any targets with the localdev_only tag from building on CI
+build --build_tag_filters=-localdev_only
+
+# this flag disables docker rules transitions as it fails to find cpp toolchains.
+# for this to work we might need to define a multiplatform cpp toolchains.
+build --@io_bazel_rules_docker//transitions:enable=false

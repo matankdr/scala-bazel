@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+
+from bazelwrapper import wrapper
+
+#
+# IMPORTANT:
+# We cannot rely on the existence of user defined environment variables in the bazel wrapper, because we don't have any
+# guarantee that shell environment variables will be present in any bazel environment (generally it depends on the
+# parent process environment, user and such)
+#
+wrapper.main()

@@ -1,0 +1,21 @@
+directories:
+  # Add the directories you want added as source here
+  # By default, we've added your entire workspace ('.')
+  .
+
+# Automatically includes all relevant targets under the 'directories' above
+derive_targets_from_directories: false
+
+additional_languages:
+  scala
+
+test_sources:
+  */src/test/java/*
+  */src/test/scala/*
+  */src/test/resources/*
+  */src/it/java/*
+  */src/it/scala/*
+  */src/it/resources/*
+  */src/e2e/java/*
+  */src/e2e/scala/*
+  */src/e2e/resources/*
