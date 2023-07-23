@@ -1,8 +1,0 @@
-package(default_visibility = ["//visibility:public"])
-
-specs2_unit_test(
-    name = "example",
-    srcs = ["sources"],
-)
-
-sources()

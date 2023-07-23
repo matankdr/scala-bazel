@@ -1,0 +1,18 @@
+package(default_visibility = ["//visibility:public"])
+
+sources()
+
+scala_library(
+    name = "workshop",
+    srcs = [
+        ":sources",
+    ],
+    deps = [
+        "@com_fasterxml_jackson_core_jackson_databind",
+        "@com_softwaremill_sttp_client3_async_http_client_backend_future_2_12",
+        "@com_softwaremill_sttp_client3_core_2_12",
+        "@com_softwaremill_sttp_model_core_2_12",
+        "@com_softwaremill_sttp_shared_core_2_12",
+        "@wix_framework//json-modules/hoopoe-json-mapper/src/main/java/com/wixpress/hoopoe/json:agg=._internal",
+    ],
+)
